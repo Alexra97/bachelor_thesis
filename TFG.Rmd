@@ -1,0 +1,1997 @@
+---
+title: "TFG"
+author: "alejandroramon.lopezr@um.es"
+date: "23 de octubre de 2019"
+output:
+  pdf_document:
+    highlight: kate
+    number_sections: yes
+    toc: yes
+  html_document:
+    df_print: paged
+    highlight: kate
+    number_sections: yes
+    theme: spacelab
+    toc: yes
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Importar los datos desde Excel y transformarlos
+
+```{r}
+library(readxl)
+
+# Importar los datos de Excel
+table <-read_excel("C:/Users/aleja/Universidad/Asignaturas/TFG/2327_macro_aadp_pssm_orange_for_plotting.xlsx")
+
+# Eliminar la última y antepenúltima columna, y las filas 2 y 3 por ser irrelevantes para el estudio de PCAs
+types <- table[3:2329,422] # Conservar los tipos a parte
+data <- table[3:2329,0:420]
+
+# Transformar columnas a tipo numérico
+data <- data.frame(lapply(data,as.numeric))
+
+# Añadir la columna de tipos
+data <- cbind(data, types)
+```
+
+# Método 1: Proyección de datos y detección basada en distancia (K-Vecinos con PCA)
+
+## PCA
+
+```{r}
+# PCA
+library(ggfortify)
+
+# Invertir el orden de los datos (mejorará la visualización de los ejemplos positivos)
+data_rev <- data[2327:1,]
+
+pca_plot <- as.data.frame(pca_result$x)
+pca_plot$tipo <- as.factor(data_rev$tipo)
+ggplot(pca_plot, aes(x=PC1, y=PC2, color=tipo))+geom_point()+
+       scale_color_manual(values=c("#FB0303","#FB6A03","#FBC903","#8BFB03","#03FB2D","#03FBDA","#0373FB",
+                                   "#3503FB","#A403FB","#FB03CD","#870709","#788707",
+                                   "#0C7D06","#0E0A84","#898989","#660A47"))+
+       ggtitle("Distribución de las proteínas para los dos principales componentes")
+```
+
+## EStudio de la varianza explicada por PCA
+
+```{r}
+library(factoextra)
+library(ggpubr)
+
+screeplot <- fviz_eig(pca_result, addlabels = T, barfill = "#2ACCCB", barcolor = "black")
+
+ggpar(screeplot, title = "Estudio de la varianza explicada por PCA", ggtheme = theme_bw(), 
+      ylab = "Porcentaje de varianza explicado", xlab = "Componente Principal", font.x = 15, font.y = 15,
+      font.tickslab = 12)
+
+```
+
+## Elección del número de ejes de PCA
+
+```{r}
+# Obtener los dos primeros componentes principales que representan el 85% de la varianza
+pc1 <- pca_result$x[,1]
+pc2 <- pca_result$x[,2]
+```
+## Separar los datos entre el conjunto de entrenamiento y el de test
+
+```{r}
+library(caret)
+
+# Crear una plantilla con el 80% de los ejemplares conocidos y desconocidos, elegidos aleatoriamente
+plantilla80 <- createDataPartition(data[[c("tipo")]],
+                                       p=0.8,
+                                       list = FALSE,
+                                       times = 1)
+
+# Crear los conjuntos de datos en función a la plantilla
+data_train80 <- data[plantilla80,]
+data_test20 <- data[-plantilla80,]
+
+# Mostrar la cantidad de ejemplares de cada clase para el conjunto total y el de entrenamiento
+table(data$tipo)
+table(data_train80$tipo)
+```
+
+## Elegir la mejor métrica para el algoritmo de K-Vecinos
+
+```{r}
+# Inicializar el data frame que almacenará el accuracy de cada K
+k_confMatrix <- data.frame(matrix(ncol = 3, nrow = 0))
+cols <- c("K","Accuracy","Kappa")
+colnames(k_confMatrix) <- cols
+
+# Para valores de K entre 3 y 10
+for (k in 3:10) {
+  
+  # Inicializar el data frame que almacenará los k vecinos más cercanos de cada proteína conocida, incluyendo estas
+  vecinos_kn <- data.frame(matrix(ncol = 7, nrow = 0))
+  cols <- c("id","pc1", "pc2", "neighbours", "totalDistance", "meanDistance", "family")
+  colnames(vecinos_kn) <- cols
+  
+  # Para cada tipo de proteína conocida
+  for (t in levels(macro_type)) { 
+    # Para cada proteína de tipo t
+    for (p in which(data_train80$tipo[] == t)) {
+      
+      # Definir el vector de distancias vacío
+      distancias <- vector()
+      
+      # Para cada proteína restante del conjunto de entrenamiento
+      for (r in which(rownames(data_train80[]) != p)) {
+    
+        # Calcular las coordenadas de las proteínas p y r
+        x <- c(pc1[p],pc2[p])
+        y <- c(pc1[r],pc2[r])
+        
+        # Calcular la distancia euclídea entre ambas proteínas
+        distancias[r] <- dist(rbind(x, y))[1]
+      }
+      
+      # Eliminar el NA producido por la proteína p, cuya distancia no se calcula consigo misma
+      distancias[is.na(distancias)] <- 10000
+      
+      # Para un número k de vecinos establecido
+      for (i in 1:k) {
+        
+        # Obtener la posición de la distancia mínima
+        posMin <- which(distancias[] == min(distancias))[1]
+
+        # Obtener la posición de la proteína en vecinos si ya se encontraba
+        posId <- which(vecinos_kn$id[] == posMin)
+        
+        # Si se obtuvo alguna o varias posiciones entonces
+        if (length(posId) > 0) {
+          flag <- 0
+          
+          # Se recorren todas las posiciones obtenidas de la proteína en la tabla
+          for (id in posId) {
+            # Si se encuentra una posición con la misma familia que se está comprobando entonces
+            if (vecinos_kn[id,7] == t) {
+              # Aumentar el número de vecinos, la distancia total y actualizar la distancia media
+              vecinos_kn[posId,4] <- as.numeric(vecinos_kn[posId,4])+1
+              vecinos_kn[posId,5] <- as.numeric(vecinos_kn[posId,5])+distancias[posMin]
+              vecinos_kn[posId,6] <- as.numeric(vecinos_kn[posId,5])/as.numeric(vecinos_kn[posId,4])
+              # Activar un flag para indicar que no hay que crear una fila nueva
+              flag <- 1
+            }
+          }
+          
+          # Si a pesar de encontrarse posiciones, no hay ninguna para la familia actual, se crea una nueva fila
+          if (flag == 0) {
+            vecinos_kn[nrow(vecinos_kn)+1,] <- cbind(posMin, pc1[posMin], pc2[posMin], 
+                                                   1, distancias[posMin], distancias[posMin], t)
+          }
+        }
+        # En otro caso se crea una nueva fila con la proteína, su posición y sus datos
+        else {
+          vecinos_kn[nrow(vecinos_kn)+1,] <- cbind(posMin, pc1[posMin], pc2[posMin], 
+                                                   1, distancias[posMin], distancias[posMin], t)
+        }
+        
+        # Se actualiza la distancia de la proteína a 10000 para que no vuelva a salir elegida
+        distancias[posMin] = 10000
+      }
+    }
+  }
+  
+  # Convertir a tipo númerico las columnas de vecinos_kn que lo requieren
+  vecinos_kn$id <- as.numeric(vecinos_kn$id)
+  vecinos_kn$pc1 <- as.numeric(vecinos_kn$pc1)
+  vecinos_kn$pc2 <- as.numeric(vecinos_kn$pc2)
+  vecinos_kn$neighbours <- as.numeric(vecinos_kn$neighbours)
+  vecinos_kn$totalDistance <- as.numeric(vecinos_kn$totalDistance)
+  vecinos_kn$meanDistance <- as.numeric(vecinos_kn$meanDistance)
+    
+  # Escoger solo los vecinos comunes
+  vec_comunes_kn <- vecinos_kn[vecinos_kn$neighbours > 1,]
+  
+  # Inicializar el data frame que almacenará las predicciones de los vecinos comunes
+  pred_vec_kn <- data.frame(matrix(ncol = 3, nrow = 0))
+  cols <- c("id", "family_pred", "family_orig")
+  colnames(pred_vec_kn) <- cols
+  
+  # Para cada vecino común
+  for (v in unique(vec_comunes_kn$id)) {
+    # Obtener el máximo número de vecinos para una misma proteína que es común a varias proteínas de familias diferentes
+    pos <- which(vec_comunes_kn$neighbours[] == max(vec_comunes_kn$neighbours[vec_comunes_kn$id == v]) 
+                 & vec_comunes_kn$id[] == v)
+    
+    # En caso de empate escoger por distancia media menor
+    if (length(pos) > 1) {
+      pos <- pos[which(pos[] == min(pos))]
+    }
+    
+    # Almacenar la familia predicha y el resto de datos en una nueva fila de la tabla de predicciones
+    pred_vec_kn[nrow(pred_vec_kn)+1,] <- cbind(v, vec_comunes_kn$family[pos], data$tipo[as.numeric(v)])
+  }
+  
+  # Convertir a tipo númerico las columnas de pred_vec_kn que lo requieren
+  pred_vec_kn$id <- as.numeric(pred_vec_kn$id)
+  
+  # Obtener la matriz de confusión que nos dará el valor de Kappa
+  union <- union(pred_vec_kn$family_pred, pred_vec_kn$family_orig)
+  mf <- caret::confusionMatrix(factor(pred_vec_kn$family_pred,union),
+                       factor(pred_vec_kn$family_orig,union),
+                       NULL, c("Predicción", "Valor real"))
+  
+  # Almacenar el accuracy de este valor de K
+  k_confMatrix[nrow(k_confMatrix)+1,] <- cbind(k, mf$overall[[1]], mf$overall[[2]])
+  
+  # Mostrar las diferentes gráficas
+  print(ggplot(vecinos_kn[length(rownames(vecinos_kn)):1,], aes(x=pc1, y=pc2, color=as.factor(family)))+geom_point()+
+               scale_color_manual(values=c("#FB0303","#FB6A03","#FBC903","#8BFB03","#03FB2D","#03FBDA","#0373FB",
+                                   "#3503FB","#A403FB","#FB03CD","#870709","#788707",
+                                   "#0C7D06","#0E0A84","#898989","#660A47"))+
+               labs(x = "PC1",y = "PC2"))
+  
+  print(ggplot(vec_comunes_kn[length(rownames(vec_comunes_kn)):1,], aes(x=pc1, y=pc2, color=as.factor(family)))+geom_point()+
+               scale_color_manual(values=c("#FB0303","#FB6A03","#FBC903","#8BFB03","#03FB2D","#03FBDA","#0373FB",
+                                   "#3503FB","#A403FB","#FB03CD","#870709","#788707",
+                                   "#0C7D06","#0E0A84","#898989","#660A47"))+
+               labs(x = "PC1",y = "PC2"))
+}
+
+# Obtener el máximo accuracy y la métrica que lo obtuvo
+maxK_pos <- which(k_confMatrix$Kappa[] == max(k_confMatrix$Kappa[]))[1]
+maxK <- k_confMatrix$K[maxK_pos]
+cat('La mejor métrica obtenida es K=',maxK,' con un Kappa del ',round(k_confMatrix$Kappa[maxK_pos]*100,2),'%.\n', sep="")
+
+```
+## Estudiar los valores obtenidos del entrenamiento
+
+```{r}
+# Mostrar la evolución de los valores de Kappa y Accuracy en función de K
+par(mfrow=c(1,2))
+qplot(K, Kappa, data = k_confMatrix, xlab="K", ylab="Kappa",colour = K, geom=c("point", "line"))
+
+qplot(K, Accuracy, data = k_confMatrix, xlab="K", ylab="Accuracy",colour = K, geom=c("point", "line"))
+```
+
+## Realizar las predicciones usando la métrica elegida para el algoritmo de K-Vecinos
+
+```{r}
+# Obtener las proteínas desconocidas
+data_unkn <- data[data$tipo == "unknown",]
+
+# Inicializar el data frame que almacenará los k vecinos más cercanos de cada proteína conocida
+vecinos <- data.frame(matrix(ncol = 7, nrow = 0))
+cols <- c("id","pc1", "pc2", "neighbours", "totalDistance", "meanDistance", "family")
+colnames(vecinos) <- cols
+
+# Para cada tipo de proteína conocida
+for (t in levels(macro_type)) {
+  # Para cada proteína de tipo t
+  for (p in which(data$tipo[] == t)) {
+    
+    # Definir el vector de distancias vacío
+    distancias <- vector()
+    
+    # Para cada proteína restante del conjunto de entrenamiento
+      for (r in which(rownames(data[]) != p)) {
+    
+        # Calcular las coordenadas de las proteínas p y r
+        x <- c(pc1[p],pc2[p])
+        y <- c(pc1[r],pc2[r])
+        
+        # Calcular la distancia euclídea entre ambas proteínas
+        distancias[r] <- dist(rbind(x, y))[1]
+      }
+      
+      # Eliminar el NA producido por la proteína p, cuya distancia no se calcula consigo misma
+      distancias[is.na(distancias)] <- 10000
+    
+    # Para el número k de vecinos elegido
+    for (i in 1:maxK) {
+      
+      # Obtener la posición de la distancia mínima
+      posMin <- which(distancias[] == min(distancias))[1]
+
+      # Obtener la posición de la proteína en vecinos si ya se encontraba
+      posId <- which(vecinos$id[] == posMin)
+      
+      # Si se obtuvo alguna o varias posiciones entonces
+      if (length(posId) > 0) {
+        flag <- 0
+        
+        # Se recorren todas las posiciones obtenidas de la proteína en la tabla
+        for (id in posId) {
+          # Si se encuentra una posición con la misma familia que se está comprobando entonces
+          if (vecinos[id,7] == t) {
+            # Aumentar el número de vecinos, la distancia total y actualizar la distancia media
+            vecinos[posId,4] <- as.numeric(vecinos[posId,4])+1
+            vecinos[posId,5] <- as.numeric(vecinos[posId,5])+distancias[posMin]
+            vecinos[posId,6] <- as.numeric(vecinos[posId,5])/as.numeric(vecinos[posId,4])
+            # Activar un flag para indicar que no hay que crear una fila nueva
+            flag <- 1
+          }
+        }
+        
+        # Si a pesar de encontrarse posiciones, no hay ninguna para la familia actual, se crea una nueva fila
+        if (flag == 0) {
+          vecinos[nrow(vecinos)+1,] <- cbind(posMin, pc1[posMin], pc2[posMin], 
+                                             1, distancias[posMin], distancias[posMin], t)
+        }
+      }
+      # En otro caso se crea una nueva fila con la proteína, su posición y sus datos
+      else {
+        vecinos[nrow(vecinos)+1,] <- cbind(posMin, pc1[posMin], pc2[posMin], 
+                                           1, distancias[posMin], distancias[posMin], t)
+      }
+      
+      # Se actualiza la distancia de la proteína a 10000 para que no vuelva a salir elegida
+      distancias[posMin] = 10000
+    }
+  }
+}
+
+# Convertir a tipo númerico las columnas que lo requieren
+vecinos$pc1 <- as.numeric(vecinos$pc1)
+vecinos$pc2 <- as.numeric(vecinos$pc2)
+vecinos$neighbours <- as.numeric(vecinos$neighbours)
+vecinos$totalDistance <- as.numeric(vecinos$totalDistance)
+vecinos$meanDistance <- as.numeric(vecinos$meanDistance)
+
+# Escoger solo los vecinos comunes
+vec_comunes <- vecinos[vecinos$neighbours > 1,]
+
+# Inicializar el data frame que almacenará las predicciones de los vecinos comunes
+pred_vec <- data.frame(matrix(ncol = 5, nrow = 0))
+cols <- c("id","pc1", "pc2", "family_pred", "score")
+colnames(pred_vec) <- cols
+
+# Para cada vecino común
+for (v in unique(vec_comunes$id)) {
+  # Obtener el máximo número de vecinos para una misma proteína que es común a varias proteínas de familias diferentes
+  pos <- which(vec_comunes$neighbours[] == max(vec_comunes$neighbours[vec_comunes$id == v]) 
+                 & vec_comunes$id[] == v)
+    
+  # En caso de empate escoger por distancia media menor
+  if (length(pos) > 1) {
+    pos <- pos[which(pos[] == min(pos))]
+  }
+  
+  # Almacenar la familia predicha y el resto de datos en una nueva fila de la tabla de predicciones
+  pred_vec[nrow(pred_vec)+1,] <- cbind(v, vec_comunes$pc1[pos], vec_comunes$pc2[pos],
+                                       vec_comunes$family[pos], vec_comunes$neighbours[pos])
+}
+
+# Convertir a tipo númerico las columnas que lo requieren
+pred_vec$id <- as.numeric(pred_vec$id)
+pred_vec$pc1 <- as.numeric(pred_vec$pc1)
+pred_vec$pc2 <- as.numeric(pred_vec$pc2)
+pred_vec$score <- as.numeric(pred_vec$score)
+
+# Eliminar las predicciones sobre proteínas ya conocidas y las predicciones correctas sobre las proteínas
+# desconocidas para quedarnos con los fallos
+pred_vec_failed <- pred_vec[pred_vec$id > 64,]
+pred_vec_failed <- pred_vec_failed[pred_vec_failed$family_pred[] != "unknown",]
+```
+
+## Visualización de los resultados del algoritmo de K-Vecinos
+
+```{r}
+# Mostrar las diferentes gráficas
+ggplot(vecinos[length(rownames(vecinos)):1,], aes(x=pc1, y=pc2, color=as.factor(family)))+geom_point()+
+               scale_color_manual(values=c("#FB0303","#FB6A03","#FBC903","#8BFB03","#03FB2D","#03FBDA","#0373FB",
+                                   "#3503FB","#A403FB","#FB03CD","#870709","#788707",
+                                   "#0C7D06","#0E0A84","#898989","#660A47"))+
+               labs(x = "PC1",y = "PC2")
+
+ggplot(vec_comunes[length(rownames(vec_comunes)):1,], aes(x=pc1, y=pc2, color=as.factor(family)))+geom_point()+
+               scale_color_manual(values=c("#FB0303","#FB6A03","#FBC903","#8BFB03","#03FB2D","#03FBDA","#0373FB",
+                                   "#3503FB","#A403FB","#FB03CD","#870709","#788707",
+                                   "#0C7D06","#0E0A84","#898989","#660A47"))+
+               labs(x = "PC1",y = "PC2")
+
+ggplot(pred_vec[length(rownames(pred_vec)):1,], aes(x=pc1, y=pc2, color=as.factor(family_pred)))+geom_point()+
+               scale_color_manual(values=c("#FB0303","#FB6A03","#FBC903","#8BFB03","#03FB2D","#03FBDA","#0373FB",
+                                   "#3503FB","#A403FB","#FB03CD","#870709","#788707",
+                                   "#0C7D06","#0E0A84","#898989","#660A47"))+
+               labs(x = "PC1",y = "PC2")
+
+pred_vec_failed_plot <- pred_vec[pred_vec$id > 64,]
+
+ggplot(pred_vec_failed_plot[length(rownames(pred_vec_failed_plot)):1,], aes(x=pc1, y=pc2, color=as.factor(family_pred)))+geom_point()+
+               scale_color_manual(values=c("#FB0303","#FB6A03","#FBC903","#8BFB03","#03FB2D","#03FBDA","#0373FB",
+                                   "#3503FB","#A403FB","#FB03CD","#870709","#788707",
+                                   "#0C7D06","#0E0A84","#898989","#660A47"))+
+               labs(x = "PC1",y = "PC2")
+```
+
+# Método 1b: Proyección de datos y detección basada en distancia (K-Vecinos con PCA y medias)
+
+## Elegir la mejor métrica para el algoritmo de K-Vecinos
+
+```{r}
+# Inicializar el data frame que almacenará el accuracy de cada K
+k_confMatrix <- data.frame(matrix(ncol = 3, nrow = 0))
+cols <- c("K","Accuracy","Kappa")
+colnames(k_confMatrix) <- cols
+
+# Para valores de K entre 3 y 10
+for (k in 3:10) {
+  
+  # Inicializar el data frame que almacenará los k vecinos más cercanos de cada proteína conocida, incluyendo estas
+  vecinos_kn <- data.frame(matrix(ncol = 7, nrow = 0))
+  cols <- c("id","pc1", "pc2", "neighbours", "totalDistance", "meanDistance", "family")
+  colnames(vecinos_kn) <- cols
+  
+  # Para cada tipo de proteína conocida
+  for (t in levels(macro_type)) { 
+    # Para cada proteína de tipo t
+    for (p in which(data_train80$tipo[] == t)) {
+      
+      # Definir el vector de distancias vacío
+      distancias <- vector()
+      
+      # Para cada proteína restante del conjunto de entrenamiento
+      for (r in which(rownames(data_train80[]) != p)) {
+    
+        # Calcular las coordenadas de las proteínas p y r
+        x <- c(pc1[p],pc2[p])
+        y <- c(pc1[r],pc2[r])
+        
+        # Calcular la distancia euclídea entre ambas proteínas
+        distancias[r] <- dist(rbind(x, y))[1]
+      }
+      
+      # Eliminar el NA producido por la proteína p, cuya distancia no se calcula consigo misma
+      distancias[is.na(distancias)] <- 10000
+      
+      # Para un número k de vecinos establecido
+      for (i in 1:k) {
+        
+        # Obtener la posición de la distancia mínima
+        posMin <- which(distancias[] == min(distancias))[1]
+
+        # Obtener la posición de la proteína en vecinos si ya se encontraba
+        posId <- which(vecinos_kn$id[] == posMin)
+        
+        # Si se obtuvo alguna o varias posiciones entonces
+        if (length(posId) > 0) {
+          flag <- 0
+          
+          # Se recorren todas las posiciones obtenidas de la proteína en la tabla
+          for (id in posId) {
+            # Si se encuentra una posición con la misma familia que se está comprobando entonces
+            if (vecinos_kn[id,7] == t) {
+              # Aumentar el número de vecinos, la distancia total y actualizar la distancia media
+              vecinos_kn[posId,4] <- as.numeric(vecinos_kn[posId,4])+1
+              vecinos_kn[posId,5] <- as.numeric(vecinos_kn[posId,5])+distancias[posMin]
+              vecinos_kn[posId,6] <- as.numeric(vecinos_kn[posId,5])/as.numeric(vecinos_kn[posId,4])
+              # Activar un flag para indicar que no hay que crear una fila nueva
+              flag <- 1
+            }
+          }
+          
+          # Si a pesar de encontrarse posiciones, no hay ninguna para la familia actual, se crea una nueva fila
+          if (flag == 0) {
+            vecinos_kn[nrow(vecinos_kn)+1,] <- cbind(posMin, pc1[posMin], pc2[posMin], 
+                                                   1, distancias[posMin], distancias[posMin], t)
+          }
+        }
+        # En otro caso se crea una nueva fila con la proteína, su posición y sus datos
+        else {
+          vecinos_kn[nrow(vecinos_kn)+1,] <- cbind(posMin, pc1[posMin], pc2[posMin], 
+                                                   1, distancias[posMin], distancias[posMin], t)
+        }
+        
+        # Se actualiza la distancia de la proteína a 10000 para que no vuelva a salir elegida
+        distancias[posMin] = 10000
+      }
+    }
+  }
+  
+  # Convertir a tipo númerico las columnas de vecinos_kn que lo requieren
+  vecinos_kn$id <- as.numeric(vecinos_kn$id)
+  vecinos_kn$pc1 <- as.numeric(vecinos_kn$pc1)
+  vecinos_kn$pc2 <- as.numeric(vecinos_kn$pc2)
+  vecinos_kn$neighbours <- as.numeric(vecinos_kn$neighbours)
+  vecinos_kn$totalDistance <- as.numeric(vecinos_kn$totalDistance)
+  vecinos_kn$meanDistance <- as.numeric(vecinos_kn$meanDistance)
+    
+  # Escoger solo los vecinos comunes
+  vec_comunes_kn <- vecinos_kn[vecinos_kn$neighbours > 1,]
+  
+  # Inicializar el data frame que almacenará las predicciones de los vecinos comunes
+  pred_vec_kn <- data.frame(matrix(ncol = 3, nrow = 0))
+  cols <- c("id", "family_pred", "family_orig")
+  colnames(pred_vec_kn) <- cols
+  
+  # Para cada vecino común
+  for (v in unique(vec_comunes_kn$id)) {
+    # Obtener el máximo número de vecinos para una misma proteína que es común a varias proteínas de familias diferentes
+    pos <- which(vec_comunes_kn$meanDistance[] == min(vec_comunes_kn$meanDistance[vec_comunes_kn$id == v])
+                 & vec_comunes_kn$id[] == v)[1]
+    
+    # Almacenar la familia predicha y el resto de datos en una nueva fila de la tabla de predicciones
+    pred_vec_kn[nrow(pred_vec_kn)+1,] <- cbind(v, vec_comunes_kn$family[pos], data$tipo[as.numeric(v)])
+  }
+  
+  # Convertir a tipo númerico las columnas de pred_vec_kn que lo requieren
+  pred_vec_kn$id <- as.numeric(pred_vec_kn$id)
+  
+  # Obtener la matriz de confusión que nos dará el valor de Kappa
+  union <- union(pred_vec_kn$family_pred, pred_vec_kn$family_orig)
+  mf <- caret::confusionMatrix(factor(pred_vec_kn$family_pred,union),
+                       factor(pred_vec_kn$family_orig,union),
+                       NULL, c("Predicción", "Valor real"))
+  
+  # Almacenar el accuracy de este valor de K
+  k_confMatrix[nrow(k_confMatrix)+1,] <- cbind(k, mf$overall[[1]], mf$overall[[2]])
+  
+  # Mostrar las diferentes gráficas
+  print(ggplot(vecinos_kn[length(rownames(vecinos_kn)):1,], aes(x=pc1, y=pc2, color=as.factor(family)))+geom_point()+
+               scale_color_manual(values=c("#FB0303","#FB6A03","#FBC903","#8BFB03","#03FB2D","#03FBDA","#0373FB",
+                                   "#3503FB","#A403FB","#FB03CD","#870709","#788707",
+                                   "#0C7D06","#0E0A84","#898989","#660A47"))+
+               labs(x = "PC1",y = "PC2") +
+               ggtitle(paste("Distribución de las proteínas que son vecinas a otras para K =",k)))
+  
+  print(ggplot(vec_comunes_kn[length(rownames(vec_comunes_kn)):1,], aes(x=pc1, y=pc2, color=as.factor(family)))+geom_point()+
+               scale_color_manual(values=c("#FB0303","#FB6A03","#FBC903","#8BFB03","#03FB2D","#03FBDA","#0373FB",
+                                   "#3503FB","#A403FB","#FB03CD","#870709","#788707",
+                                   "#0C7D06","#0E0A84","#898989","#660A47"))+
+               labs(x = "PC1",y = "PC2") +
+               ggtitle(paste("Distribución de las proteínas que son vecinas comunes para K =",k)))
+}
+
+# Obtener el máximo accuracy y la métrica que lo obtuvo
+maxK_pos <- which(k_confMatrix$Kappa[] == max(k_confMatrix$Kappa[]))[1]
+maxK <- k_confMatrix$K[maxK_pos]
+cat('La mejor métrica obtenida es K=',maxK,' con un Kappa del ',round(k_confMatrix$Kappa[maxK_pos]*100,2),'%.\n', sep="")
+
+```
+
+## Estudiar los valores obtenidos del entrenamiento
+
+```{r}
+# Mostrar la evolución de los valores de Kappa y Accuracy en función de K
+par(mfrow=c(1,2))
+qplot(K, Kappa, data = k_confMatrix, xlab="K", ylab="Kappa",colour = K, geom=c("point", "line"),
+      main="Evolución del valor de Kappa en función de K")
+
+qplot(K, Accuracy, data = k_confMatrix, xlab="K", ylab="Accuracy",colour = K, geom=c("point", "line"),
+      main="Evolución del valor de Accuracy en función de K")
+```
+
+## Demostración de que las distancias a 0 no son errores
+
+```{r}
+library(plyr)
+
+# Obtener las frecuencias de aparición de las coordenadas de las proteínas
+bps <- cbind(pc1,pc2)
+count <- count(bps)
+
+count[count$freq > 2,]
+bps[pc1 == count$x.pc1[count$freq == 6],]
+
+```
+
+## Realizar las predicciones usando la métrica elegida para el algoritmo de K-Vecinos
+
+```{r}
+# Obtener las proteínas desconocidas
+data_unkn <- data[data$tipo == "unknown",]
+
+# Inicializar el data frame que almacenará los k vecinos más cercanos de cada proteína conocida
+vecinos <- data.frame(matrix(ncol = 7, nrow = 0))
+cols <- c("id","pc1", "pc2", "neighbours", "totalDistance", "meanDistance", "family")
+colnames(vecinos) <- cols
+
+# Para cada tipo de proteína conocida
+for (t in levels(macro_type)) {
+  # Para cada proteína de tipo t
+  for (p in which(data$tipo[] == t)) {
+    
+    # Definir el vector de distancias vacío
+    distancias <- vector()
+    
+    # Para cada proteína restante del conjunto de entrenamiento
+      for (r in which(rownames(data[]) != p)) {
+    
+        # Calcular las coordenadas de las proteínas p y r
+        x <- c(pc1[p],pc2[p])
+        y <- c(pc1[r],pc2[r])
+        
+        # Calcular la distancia euclídea entre ambas proteínas
+        distancias[r] <- dist(rbind(x, y))[1]
+      }
+      
+      # Eliminar el NA producido por la proteína p, cuya distancia no se calcula consigo misma
+      distancias[is.na(distancias)] <- 10000
+    
+    # Para el número k de vecinos elegido
+    for (i in 1:maxK) {
+      
+      # Obtener la posición de la distancia mínima
+      posMin <- which(distancias[] == min(distancias))[1]
+
+      # Obtener la posición de la proteína en vecinos si ya se encontraba
+      posId <- which(vecinos$id[] == posMin)
+      
+      # Si se obtuvo alguna o varias posiciones entonces
+      if (length(posId) > 0) {
+        flag <- 0
+        
+        # Se recorren todas las posiciones obtenidas de la proteína en la tabla
+        for (id in posId) {
+          # Si se encuentra una posición con la misma familia que se está comprobando entonces
+          if (vecinos[id,7] == t) {
+            # Aumentar el número de vecinos, la distancia total y actualizar la distancia media
+            vecinos[posId,4] <- as.numeric(vecinos[posId,4])+1
+            vecinos[posId,5] <- as.numeric(vecinos[posId,5])+distancias[posMin]
+            vecinos[posId,6] <- as.numeric(vecinos[posId,5])/as.numeric(vecinos[posId,4])
+            # Activar un flag para indicar que no hay que crear una fila nueva
+            flag <- 1
+          }
+        }
+        
+        # Si a pesar de encontrarse posiciones, no hay ninguna para la familia actual, se crea una nueva fila
+        if (flag == 0) {
+          vecinos[nrow(vecinos)+1,] <- cbind(posMin, pc1[posMin], pc2[posMin], 
+                                             1, distancias[posMin], distancias[posMin], t)
+        }
+      }
+      # En otro caso se crea una nueva fila con la proteína, su posición y sus datos
+      else {
+        vecinos[nrow(vecinos)+1,] <- cbind(posMin, pc1[posMin], pc2[posMin], 
+                                           1, distancias[posMin], distancias[posMin], t)
+      }
+      
+      # Se actualiza la distancia de la proteína a 10000 para que no vuelva a salir elegida
+      distancias[posMin] = 10000
+    }
+  }
+}
+
+# Convertir a tipo númerico las columnas que lo requieren
+vecinos$pc1 <- as.numeric(vecinos$pc1)
+vecinos$pc2 <- as.numeric(vecinos$pc2)
+vecinos$neighbours <- as.numeric(vecinos$neighbours)
+vecinos$totalDistance <- as.numeric(vecinos$totalDistance)
+vecinos$meanDistance <- as.numeric(vecinos$meanDistance)
+
+# Escoger solo los vecinos comunes
+vec_comunes <- vecinos[vecinos$neighbours > 1,]
+
+# Inicializar el data frame que almacenará las predicciones de los vecinos comunes
+pred_vec <- data.frame(matrix(ncol = 5, nrow = 0))
+cols <- c("id","pc1", "pc2", "family_pred", "score")
+colnames(pred_vec) <- cols
+
+# Para cada vecino común
+for (v in unique(vec_comunes$id)) {
+  # Obtener el máximo número de vecinos para una misma proteína que es común a varias proteínas de familias diferentes
+  pos <- which(vec_comunes$meanDistance[] == min(vec_comunes$meanDistance[vec_comunes$id == v])
+               & vec_comunes$id[] == v)[1]
+  
+  # Almacenar la familia predicha y el resto de datos en una nueva fila de la tabla de predicciones
+  pred_vec[nrow(pred_vec)+1,] <- cbind(v, vec_comunes$pc1[pos], vec_comunes$pc2[pos],
+                                       vec_comunes$family[pos], vec_comunes$meanDistance[pos])
+}
+
+# Convertir a tipo númerico las columnas que lo requieren
+pred_vec$id <- as.numeric(pred_vec$id)
+pred_vec$pc1 <- as.numeric(pred_vec$pc1)
+pred_vec$pc2 <- as.numeric(pred_vec$pc2)
+pred_vec$score <- as.numeric(pred_vec$score)
+
+# Eliminar las predicciones sobre proteínas ya conocidas y las predicciones correctas sobre las proteínas
+# desconocidas para quedarnos con los fallos
+pred_vec_failed <- pred_vec[pred_vec$id > 64,]
+pred_vec_failed <- pred_vec_failed[pred_vec_failed$family_pred[] != "unknown",]
+```
+
+## Visualización de los resultados del algoritmo de K-Vecinos
+
+```{r}
+# Mostrar las diferentes gráficas
+ggplot(vecinos[length(rownames(vecinos)):1,], aes(x=pc1, y=pc2, color=as.factor(family)))+geom_point()+
+               scale_color_manual(values=c("#FB0303","#FB6A03","#FBC903","#8BFB03","#03FB2D","#03FBDA","#0373FB",
+                                   "#3503FB","#A403FB","#FB03CD","#870709","#788707",
+                                   "#0C7D06","#0E0A84","#898989","#660A47"))+
+               labs(x = "PC1",y = "PC2") +
+               ggtitle(paste("Distribución de las proteínas que son vecinas a otras para K =",maxK))
+
+ggplot(vec_comunes[length(rownames(vec_comunes)):1,], aes(x=pc1, y=pc2, color=as.factor(family)))+geom_point()+
+               scale_color_manual(values=c("#FB0303","#FB6A03","#FBC903","#8BFB03","#03FB2D","#03FBDA","#0373FB",
+                                   "#3503FB","#A403FB","#FB03CD","#870709","#788707",
+                                   "#0C7D06","#0E0A84","#898989","#660A47"))+
+               labs(x = "PC1",y = "PC2") +
+               ggtitle(paste("Distribución de las proteínas que son vecinas comunes para K =",maxK))
+
+ggplot(pred_vec[length(rownames(pred_vec)):1,], aes(x=pc1, y=pc2, color=as.factor(family_pred)))+geom_point()+
+               scale_color_manual(values=c("#FB0303","#FB6A03","#FBC903","#8BFB03","#03FB2D","#03FBDA","#0373FB",
+                                   "#3503FB","#A403FB","#FB03CD","#870709","#788707",
+                                   "#0E0A84","#898989","#660A47"))+
+               labs(x = "PC1",y = "PC2") +
+               ggtitle(paste("Distribución de las proteínas predichas para K =",maxK))
+
+pred_vec_failed_plot <- pred_vec[pred_vec$id > 64,]
+
+ggplot(pred_vec_failed_plot[length(rownames(pred_vec_failed_plot)):1,], aes(x=pc1, y=pc2, color=as.factor(family_pred)))+geom_point()+
+               scale_color_manual(values=c("#FB0303","#FB6A03","#FBC903","#8BFB03","#03FB2D","#03FBDA","#0373FB",
+                                   "#3503FB","#A403FB","#FB03CD","#870709","#788707",
+                                   "#0E0A84","#898989","#660A47"))+
+               labs(x = "PC1",y = "PC2") +
+               ggtitle(paste("Distribución de las proteínas desconocidas predichas que fallaron para K =",maxK))
+```
+
+# Método 1c: Proyección de datos y detección basada en distancia (K-Vecinos con UMAP)
+
+## UMAP
+
+```{r}
+library(umap)
+
+# Aplicar UMAP a los datos
+umap_result <- umap(data[,1:420])
+
+# Crear el data frame para las nuevas coordenadas de UMAP
+umap_data <- data.frame(layout1 = umap_result$layout[,1],
+                        layout2 = umap_result$layout[,2],
+                        tipo = macro_type)
+
+# Visualizar los datos sobre los ejes de UMAP
+ggplot(umap_data[length(rownames(umap_data)):1,], aes(x=layout1, y=layout2, color=tipo))+geom_point()+
+               scale_color_manual(values=c("#FB0303","#FB6A03","#FBC903","#8BFB03","#03FB2D","#03FBDA","#0373FB",
+                                   "#3503FB","#A403FB","#FB03CD","#870709","#788707",
+                                   "#0C7D06","#0E0A84","#898989","#660A47"))+
+               labs(x = "Layout1",y = "Layout2")
+
+# Hacer zoom para ver la separación de clases
+ggplot(umap_data[length(rownames(umap_data)):1,], aes(x=layout1, y=layout2, color=tipo))+geom_point()+
+               scale_color_manual(values=c("#FB0303","#FB6A03","#FBC903","#8BFB03","#03FB2D","#03FBDA","#0373FB",
+                                   "#3503FB","#A403FB","#FB03CD","#870709","#788707",
+                                   "#0C7D06","#0E0A84","#898989","#660A47"))+
+               labs(x = "Layout1",y = "Layout2")+xlim(-10,15)
+```
+
+## Elegir la mejor métrica para el algoritmo de K-Vecinos
+
+```{r}
+# Inicializar el data frame que almacenará el accuracy de cada K
+k_confMatrix <- data.frame(matrix(ncol = 3, nrow = 0))
+cols <- c("K","Accuracy","Kappa")
+colnames(k_confMatrix) <- cols
+
+# Para valores de K entre 3 y 10
+for (k in 3:10) {
+  
+  # Inicializar el data frame que almacenará los k vecinos más cercanos de cada proteína conocida, incluyendo estas
+  vecinos_kn <- data.frame(matrix(ncol = 7, nrow = 0))
+  cols <- c("id","layout1", "layout2", "neighbours", "totalDistance", "meanDistance", "family")
+  colnames(vecinos_kn) <- cols
+  
+  # Para cada tipo de proteína conocida
+  for (t in levels(macro_type)) { 
+    # Para cada proteína de tipo t
+    for (p in which(data_train80$tipo[] == t)) {
+      
+      # Definir el vector de distancias vacío
+      distancias <- vector()
+      
+      # Para cada proteína restante del conjunto de entrenamiento
+      for (r in which(rownames(data_train80[]) != p)) {
+    
+        # Calcular las coordenadas de las proteínas p y r
+        x <- c(umap_result$layout[,1][p],umap_result$layout[,2][p])
+        y <- c(umap_result$layout[,1][r],umap_result$layout[,2][r])
+        
+        # Calcular la distancia euclídea entre ambas proteínas
+        distancias[r] <- dist(rbind(x, y))[1]
+      }
+      
+      # Eliminar el NA producido por la proteína p, cuya distancia no se calcula consigo misma
+      distancias[is.na(distancias)] <- 10000
+      
+      # Para un número k de vecinos establecido
+      for (i in 1:k) {
+        
+        # Obtener la posición de la distancia mínima
+        posMin <- which(distancias[] == min(distancias))[1]
+
+        # Obtener la posición de la proteína en vecinos si ya se encontraba
+        posId <- which(vecinos_kn$id[] == posMin)
+        
+        # Si se obtuvo alguna o varias posiciones entonces
+        if (length(posId) > 0) {
+          flag <- 0
+          
+          # Se recorren todas las posiciones obtenidas de la proteína en la tabla
+          for (id in posId) {
+            # Si se encuentra una posición con la misma familia que se está comprobando entonces
+            if (vecinos_kn[id,7] == t) {
+              # Aumentar el número de vecinos, la distancia total y actualizar la distancia media
+              vecinos_kn[posId,4] <- as.numeric(vecinos_kn[posId,4])+1
+              vecinos_kn[posId,5] <- as.numeric(vecinos_kn[posId,5])+distancias[posMin]
+              vecinos_kn[posId,6] <- as.numeric(vecinos_kn[posId,5])/as.numeric(vecinos_kn[posId,4])
+              # Activar un flag para indicar que no hay que crear una fila nueva
+              flag <- 1
+            }
+          }
+          
+          # Si a pesar de encontrarse posiciones, no hay ninguna para la familia actual, se crea una nueva fila
+          if (flag == 0) {
+            vecinos_kn[nrow(vecinos_kn)+1,] <- cbind(posMin, umap_result$layout[,1][posMin],
+                                                     umap_result$layout[,2][posMin], 
+                                                     1, distancias[posMin], distancias[posMin], t)
+          }
+        }
+        # En otro caso se crea una nueva fila con la proteína, su posición y sus datos
+        else {
+          vecinos_kn[nrow(vecinos_kn)+1,] <- cbind(posMin, umap_result$layout[,1][posMin],
+                                                   umap_result$layout[,2][posMin], 
+                                                   1, distancias[posMin], distancias[posMin], t)
+        }
+        
+        # Se actualiza la distancia de la proteína a 10000 para que no vuelva a salir elegida
+        distancias[posMin] = 10000
+      }
+    }
+  }
+  
+  # Convertir a tipo númerico las columnas de vecinos_kn que lo requieren
+  vecinos_kn$id <- as.numeric(vecinos_kn$id)
+  vecinos_kn$layout1 <- as.numeric(vecinos_kn$layout1)
+  vecinos_kn$layout2 <- as.numeric(vecinos_kn$layout2)
+  vecinos_kn$neighbours <- as.numeric(vecinos_kn$neighbours)
+  vecinos_kn$totalDistance <- as.numeric(vecinos_kn$totalDistance)
+  vecinos_kn$meanDistance <- as.numeric(vecinos_kn$meanDistance)
+    
+  # Escoger solo los vecinos comunes
+  vec_comunes_kn <- vecinos_kn[vecinos_kn$neighbours > 1,]
+  
+  # Inicializar el data frame que almacenará las predicciones de los vecinos comunes
+  pred_vec_kn <- data.frame(matrix(ncol = 3, nrow = 0))
+  cols <- c("id", "family_pred", "family_orig")
+  colnames(pred_vec_kn) <- cols
+  
+  # Para cada vecino común
+  for (v in unique(vec_comunes_kn$id)) {
+    # Obtener el máximo número de vecinos para una misma proteína que es común a varias proteínas de familias diferentes
+    pos <- which(vec_comunes_kn$neighbours[] == max(vec_comunes_kn$neighbours[vec_comunes_kn$id == v]) 
+                   & vec_comunes_kn$id[] == v)
+      
+    # En caso de empate escoger por distancia media menor
+    if (length(pos) > 1) {
+      pos <- pos[which(pos[] == min(pos))]
+    }
+    
+    # Almacenar la familia predicha y el resto de datos en una nueva fila de la tabla de predicciones
+    pred_vec_kn[nrow(pred_vec_kn)+1,] <- cbind(v, vec_comunes_kn$family[pos], data$tipo[as.numeric(v)])
+  }
+  
+  # Convertir a tipo númerico las columnas de pred_vec_kn que lo requieren
+  pred_vec_kn$id <- as.numeric(pred_vec_kn$id)
+  
+  # Obtener la matriz de confusión que nos dará el valor de Kappa
+  union <- union(pred_vec_kn$family_pred, pred_vec_kn$family_orig)
+  mf <- caret::confusionMatrix(factor(pred_vec_kn$family_pred,union),
+                       factor(pred_vec_kn$family_orig,union),
+                       NULL, c("Predicción", "Valor real"))
+  
+  # Almacenar el accuracy de este valor de K
+  k_confMatrix[nrow(k_confMatrix)+1,] <- cbind(k, mf$overall[[1]], mf$overall[[2]])
+  
+  # Mostrar las diferentes gráficas
+  print(ggplot(vecinos_kn[length(rownames(vecinos_kn)):1,], aes(x=layout1, y=layout2, color=as.factor(family)))+geom_point()+
+               scale_color_manual(values=c("#FB0303","#FB6A03","#FBC903","#8BFB03","#03FB2D","#03FBDA","#0373FB",
+                                   "#3503FB","#A403FB","#FB03CD","#870709","#788707",
+                                   "#0C7D06","#0E0A84","#898989","#660A47"))+
+               labs(x = "Layout1",y = "Layout2")+xlim(-10,15))
+
+  print(ggplot(vec_comunes_kn[length(rownames(vec_comunes_kn)):1,], aes(x=layout1, y=layout2, color=as.factor(family)))+geom_point()+
+               scale_color_manual(values=c("#FB0303","#FB6A03","#FBC903","#8BFB03","#03FB2D","#03FBDA","#0373FB",
+                                   "#3503FB","#A403FB","#FB03CD","#870709","#788707",
+                                   "#0C7D06","#0E0A84","#898989","#660A47"))+
+               labs(x = "Layout1",y = "Layout2")+xlim(-10,15))
+}
+
+# Obtener el máximo accuracy y la métrica que lo obtuvo
+maxK_pos <- which(k_confMatrix$Kappa[] == max(k_confMatrix$Kappa[]))[1]
+maxK <- k_confMatrix$K[maxK_pos]
+cat('La mejor métrica obtenida es K=',maxK,' con un Kappa del ',round(k_confMatrix$Kappa[maxK_pos]*100,2),'%.\n', sep="")
+
+```
+
+## Estudiar los valores obtenidos del entrenamiento
+
+```{r}
+# Mostrar la evolución de los valores de Kappa y Accuracy en función de K
+qplot(K, Kappa, data = k_confMatrix, xlab="K", ylab="Kappa",colour = K, geom = c("point", "line"))
+
+qplot(K, Accuracy, data = k_confMatrix, xlab="K", ylab="Accuracy",colour = K, geom = c("point", "line"))
+```
+
+## Realizar las predicciones usando la métrica elegida para el algoritmo de K-Vecinos
+
+```{r}
+# Inicializar el data frame que almacenará los k vecinos más cercanos de cada proteína conocida
+vecinos <- data.frame(matrix(ncol = 7, nrow = 0))
+cols <- c("id","layout1", "layout2", "neighbours", "totalDistance", "meanDistance", "family")
+colnames(vecinos) <- cols
+
+# Para cada tipo de proteína conocida
+for (t in levels(macro_type)) {
+  # Para cada proteína de tipo t
+  for (p in which(data$tipo[] == t)) {
+    
+    # Definir el vector de distancias vacío
+    distancias <- vector()
+    
+    # Para cada proteína restante del conjunto de entrenamiento
+      for (r in which(rownames(data[]) != p)) {
+    
+        # Calcular las coordenadas de las proteínas p y r
+        x <- c(umap_result$layout[,1][p],umap_result$layout[,2][p])
+        y <- c(umap_result$layout[,1][r],umap_result$layout[,2][r])
+        
+        # Calcular la distancia euclídea entre ambas proteínas
+        distancias[r] <- dist(rbind(x, y))[1]
+      }
+      
+      # Eliminar el NA producido por la proteína p, cuya distancia no se calcula consigo misma
+      distancias[is.na(distancias)] <- 10000
+    
+    # Para el número k de vecinos elegido
+    for (i in 1:maxK) {
+      
+      # Obtener la posición de la distancia mínima
+      posMin <- which(distancias[] == min(distancias))[1]
+
+      # Obtener la posición de la proteína en vecinos si ya se encontraba
+      posId <- which(vecinos$id[] == posMin)
+      
+      # Si se obtuvo alguna o varias posiciones entonces
+      if (length(posId) > 0) {
+        flag <- 0
+        
+        # Se recorren todas las posiciones obtenidas de la proteína en la tabla
+        for (id in posId) {
+          # Si se encuentra una posición con la misma familia que se está comprobando entonces
+          if (vecinos[id,7] == t) {
+            # Aumentar el número de vecinos, la distancia total y actualizar la distancia media
+            vecinos[posId,4] <- as.numeric(vecinos[posId,4])+1
+            vecinos[posId,5] <- as.numeric(vecinos[posId,5])+distancias[posMin]
+            vecinos[posId,6] <- as.numeric(vecinos[posId,5])/as.numeric(vecinos[posId,4])
+            # Activar un flag para indicar que no hay que crear una fila nueva
+            flag <- 1
+          }
+        }
+        
+        # Si a pesar de encontrarse posiciones, no hay ninguna para la familia actual, se crea una nueva fila
+        if (flag == 0) {
+          vecinos[nrow(vecinos)+1,] <- cbind(posMin, umap_result$layout[,1][posMin], umap_result$layout[,2][posMin], 
+                                             1, distancias[posMin], distancias[posMin], t)
+        }
+      }
+      # En otro caso se crea una nueva fila con la proteína, su posición y sus datos
+      else {
+        vecinos[nrow(vecinos)+1,] <- cbind(posMin, umap_result$layout[,1][posMin], umap_result$layout[,2][posMin], 
+                                           1, distancias[posMin], distancias[posMin], t)
+      }
+      
+      # Se actualiza la distancia de la proteína a 10000 para que no vuelva a salir elegida
+      distancias[posMin] = 10000
+    }
+  }
+}
+
+# Convertir a tipo númerico las columnas que lo requieren
+vecinos$layout1 <- as.numeric(vecinos$layout1)
+vecinos$layout2 <- as.numeric(vecinos$layout2)
+vecinos$neighbours <- as.numeric(vecinos$neighbours)
+vecinos$totalDistance <- as.numeric(vecinos$totalDistance)
+vecinos$meanDistance <- as.numeric(vecinos$meanDistance)
+
+# Escoger solo los vecinos comunes
+vec_comunes <- vecinos[vecinos$neighbours > 1,]
+
+# Inicializar el data frame que almacenará las predicciones de los vecinos comunes
+pred_vec <- data.frame(matrix(ncol = 5, nrow = 0))
+cols <- c("id","layout1", "layout2", "family_pred", "score")
+colnames(pred_vec) <- cols
+
+# Para cada vecino común
+for (v in unique(vec_comunes$id)) {
+  # Obtener el máximo número de vecinos para una misma proteína que es común a varias proteínas de familias diferentes
+  pos <- which(vec_comunes$neighbours[] == max(vec_comunes$neighbours[vec_comunes$id == v]) 
+                 & vec_comunes$id[] == v)
+    
+  # En caso de empate escoger por distancia media menor
+  if (length(pos) > 1) {
+    pos <- pos[which(pos[] == min(pos))]
+  }
+  
+  # Almacenar la familia predicha y el resto de datos en una nueva fila de la tabla de predicciones
+  pred_vec[nrow(pred_vec)+1,] <- cbind(v, vec_comunes$layout1[pos], vec_comunes$layout2[pos],
+                                       vec_comunes$family[pos], vec_comunes$neighbours[pos])
+}
+
+# Convertir a tipo númerico las columnas que lo requieren
+pred_vec$id <- as.numeric(pred_vec$id)
+pred_vec$layout1 <- as.numeric(pred_vec$layout1)
+pred_vec$layout2 <- as.numeric(pred_vec$layout2)
+pred_vec$score <- as.numeric(pred_vec$score)
+
+# Eliminar las predicciones sobre proteínas ya conocidas y las predicciones correctas sobre las proteínas
+# desconocidas para quedarnos con los fallos
+pred_vec_failed <- pred_vec[pred_vec$id > 64,]
+pred_vec_failed <- pred_vec_failed[pred_vec_failed$family_pred[] != "unknown",]
+```
+
+## Visualización de los resultados del algoritmo de K-Vecinos
+
+```{r}
+# Mostrar las diferentes gráficas
+# Mostrar las diferentes gráficas
+ggplot(vecinos[length(rownames(vecinos)):1,], aes(x=layout1, y=layout2, color=as.factor(family)))+geom_point()+
+               scale_color_manual(values=c("#FB0303","#FB6A03","#FBC903","#8BFB03","#03FB2D","#03FBDA","#0373FB",
+                                   "#3503FB","#A403FB","#FB03CD","#870709","#788707",
+                                   "#0C7D06","#0E0A84","#898989","#660A47"))+
+               labs(x = "PC1",y = "PC2")+xlim(-10,5)
+
+ggplot(vec_comunes[length(rownames(vec_comunes)):1,], aes(x=layout1, y=layout2, color=as.factor(family)))+geom_point()+
+               scale_color_manual(values=c("#FB0303","#FB6A03","#FBC903","#8BFB03","#03FB2D","#03FBDA","#0373FB",
+                                   "#3503FB","#A403FB","#FB03CD","#870709","#788707",
+                                   "#0C7D06","#0E0A84","#898989","#660A47"))+
+               labs(x = "PC1",y = "PC2")+xlim(-10,5)
+
+ggplot(pred_vec[length(rownames(pred_vec)):1,], aes(x=layout1, y=layout2, color=as.factor(family_pred)))+geom_point()+
+               scale_color_manual(values=c("#FB0303","#FB6A03","#FBC903","#8BFB03","#03FB2D","#03FBDA","#0373FB",
+                                   "#3503FB","#A403FB","#FB03CD","#870709","#788707",
+                                   "#0C7D06","#0E0A84","#898989","#660A47"))+
+               labs(x = "PC1",y = "PC2")+xlim(-10,5)
+
+pred_vec_failed_plot <- pred_vec[pred_vec$id > 64,]
+
+ggplot(pred_vec_failed_plot[length(rownames(pred_vec_failed_plot)):1,], aes(x=layout1, y=layout2, color=as.factor(family_pred)))+geom_point()+
+               scale_color_manual(values=c("#FB0303","#FB6A03","#FBC903","#8BFB03","#03FB2D","#03FBDA","#0373FB",
+                                   "#3503FB","#A403FB","#FB03CD","#870709","#788707",
+                                   "#0C7D06","#0E0A84","#898989","#660A47"))+
+               labs(x = "PC1",y = "PC2")+xlim(-10,5)
+
+```
+
+# Método 2: Machine Learning aplicado a subproblemas (RF)
+
+## ¿Por qué dividir en subproblemas?
+
+```{r}
+# Gráfico de barras para demostrar la descompensación de ejemplos de cada clase
+barplot(rbind(table(data_train80$tipo)),
+        main="Proporción de clases en el conjunto de proteínas",
+			  xlab="Tipo",col="orange")
+
+cat('Concretamente el número de ejemplos conocidos y desconocidos es:',
+    sum(table(data_train80$tipo[data_train80$tipo != "unknown"])), 
+    '(Known),',table(data_train80$tipo[data_train80$tipo == "unknown"]), '(Unknown)')
+```
+
+## Crear subproblemas compensados
+
+```{r}
+# Convertir el tipo en factor
+data_train_factor <- data_train80
+data_train_factor$tipo <- as.factor(data_train80$tipo)
+
+# Definir el número de casos de proteínas conocidas y desconocidas
+num_unk <- length(which(data_train80$tipo[] == "unknown"))            # 1811
+num_kn <- length(which(data_train80$tipo[] != "unknown"))             # 59
+
+# Obtener los datos de los ejemplares conocidos
+data_kn80 <- data_train_factor[1:num_kn,]
+
+# Obtener el número de sets y de proteínas restantes
+num_sets <- trunc(num_unk / num_kn)
+num_rest <- num_unk %% num_kn
+
+# Elegir el factor que decidirá el número de sets (y de modelos más tarde)
+factor <- 1
+
+# Repetir factor veces (Método 2b)
+for (f in 1:factor) {
+  # Generar una secuencia aleatoria de los 1811 ejemplares desconocidos
+  randSeq <- sample((1+num_kn):num_total, num_unk, replace=FALSE)       # 60:1870
+  
+  # Obtener los datos de los ejemplares desconocidos, como la división no es exacta se crea un data frame a parte para 
+  # los datos restantes
+  split_unk <- data_train_factor[randSeq[1:(num_unk-num_rest)],]                    # 1:1770
+  split_unk_rest <- data_train_factor[randSeq[(num_unk-num_rest+1):num_unk],]       # 1771:1811
+  
+  # Dividir los datos en 30 conjuntos de 59 ejemplares cada uno, más el conjunto restante de 41
+  datalist <- split(split_unk, 1:num_sets)
+  
+  # Añadir a cada conjunto de ejemplares desconocidos una cantidad igual de ejemplares conocidos para formar los 
+  # conjuntos de datos finales
+  datasets_aux <- lapply(seq_along(datalist), function(i) rbind(datalist[[i]],data_kn80))
+  data_resto_aux <- rbind(split_unk_rest,data_kn80[sample(1:num_kn, num_rest, replace=FALSE),])
+  
+  # Unir los resultados
+  if (f == 1) {
+    datasets <- datasets_aux
+    datasets[[length(datasets)+1]] <- data_resto_aux
+  } 
+  else {
+    datasets <- append(datasets, datasets_aux)
+    datasets[[length(datasets)+1]] <- data_resto_aux
+  }
+}
+```
+
+## Selección de características mediante eliminación recursiva de características para cada subproblema
+
+```{r}
+# Definir el control usando Random Forest con Cross-validation de 5 pliegues
+control <- rfeControl(functions=rfFuncs, method="LGOCV", number=5, verbose=F)
+
+# Inicializar el vector de sets simplificados por RFE
+datasets_cut <- vector("list", length(datasets))
+
+# Para cada set de datos
+for (i in 1:length(datasets)) {
+  # Obtener el set de datos
+  set <- droplevels(datasets[[i]])
+  
+  # Seleccionar las características
+  results <- rfe(set[,1:420], set[,421], sizes=seq(1,250,5), rfeControl=control)
+  
+  # Obtener los índices de las propiedades elegidas
+  indexes <- vector(mode="integer",results$optsize)
+
+  for (j in 1:results$optsize) {
+    indexes[j] <- which(colnames(data_train80) == results$optVariables[j])
+  }
+
+  # Almacenar los sets resultantes
+  datasets_cut[[i]] <- set[,c(indexes,421)]
+}
+
+# Obtener la longitud de los sets para mostrarlos en la gráfica
+plotRFE <- data.frame(matrix(ncol = 2, nrow = 0))
+cols <- c("set","features")
+colnames(plotRFE) <- cols
+
+for (s in 1:length(datasets_cut)) {
+    plotRFE[nrow(plotRFE)+1,] <- cbind(s, length(datasets_cut[[s]]))
+}
+
+# Mostrar la gráfica
+qplot(set, features, data = plotRFE, colour = set, geom = c("point", "line"),
+      main = "Características seleccionadas para cada set")
+
+qplot(set, features, data = plotRFE, colour = set, geom = c("point", "line", "smooth"),
+      main = "Características seleccionadas para cada set")
+```
+
+## Generación de los modelos de aprenzidaje supervisado para cada set de datos (Método 2: RF)
+
+```{r}
+library(randomForest)
+
+# Definir el control del entrenamiento mediante un método de remuestreo del tipo "oob" (Out of Bag)
+# Ya que el resto de métodos no sirven para este caso concreto:
+#     - cv, repeatedcv, LOOCV y LGOCV: Todos se basan en CV, para conjuntos tan pequeños producen
+#                                      errores al dejar clases fuera del conjunto de train que luego
+#                                      aparecen en el conjunto de test.
+#     - boot: Produce el mismo problema.
+#     - timeslice: Solo es adecuado para conjuntos de datos temporales.
+#     - none: Aún que funcionaría sólo es adecuado no usar un método de ajuste cuando ya sabemos los
+#             parámetros que debe usar el modelo (no es el caso).
+tc <- trainControl(method="oob",verboseIter=T)
+
+# Inicializar la lista de modelos
+models <- list()
+
+# Para cada set de datos
+for (i in 1:length(datasets_cut)) {
+  # Obtener el set correspondiente
+  set <- droplevels(datasets_cut[[i]])
+
+  # Seleccionar las variables de entrada al modelo
+  varsEntrada <- setdiff(names(set),c("tipo"))
+  
+  # Entrenar y almacenar cada modelo de Random Forest obtenido
+  models[[i]] <-  train(set[varsEntrada], set[["tipo"]], method='rf', trControl=tc)
+  }
+```
+
+## Generación de los modelos de aprenzidaje supervisado para cada set de datos (Método 2c: SVM)
+
+```{r}
+# Definir el control del entrenamiento mediante un método de remuestreo del tipo "repeatedcv"
+tc <- trainControl(method="repeatedcv",number=5,repeats=5,verboseIter=T)
+
+# Inicializar la lista de modelos
+models <- list()
+
+# Para cada set de datos
+for (i in 1:length(datasets_cut)) {
+  # Obtener el set correspondiente
+  set <- droplevels(datasets_cut[[i]])
+
+  # Seleccionar las variables de entrada al modelo
+  varsEntrada <- setdiff(names(set),c("tipo"))
+  
+  # Entrenar y almacenar cada modelo de SVM obtenido
+  models[[i]] <-  train(set[varsEntrada], set[["tipo"]], method='svmRadial', trControl=tc)
+  }
+```
+
+## Generación de los modelos de aprenzidaje supervisado para cada set de datos (Método 2d: NNET)
+
+```{r}
+# Definir el control del entrenamiento mediante un método de remuestreo del tipo "repeatedcv"
+tc <- trainControl(method="boot_all",number=5,verboseIter=T)
+
+# Inicializar la lista de modelos
+models <- list()
+
+# Para cada set de datos
+for (i in 1:length(datasets_cut)) {
+  # Obtener el set correspondiente
+  set <- droplevels(datasets_cut[[i]])
+
+  # Seleccionar las variables de entrada al modelo
+  varsEntrada <- setdiff(names(set),c("tipo"))
+  
+  nnetGrid <-  expand.grid(size = c(1,5,10,15),
+                          decay = c(0.1,0.3,0.5))
+  
+  # Entrenar y almacenar cada modelo de NNET obtenido
+  models[[i]] <-  train(set[varsEntrada], set[["tipo"]], method='nnet', tuneGrid=nnetGrid, 
+                        MaxNWts = 5076, trControl=tc)
+  }
+```
+
+## Generación de los modelos de aprenzidaje supervisado para cada set de datos (Método 2e: SGBM)
+
+```{r}
+# Definir el control del entrenamiento mediante un método de remuestreo del tipo "repeatedcv"
+tc <- trainControl(method="repeatedcv",number=5,repeats=5,verboseIter=F)
+
+# Inicializar la lista de modelos
+models <- list()
+
+# Para cada set de datos
+for (i in 1:length(datasets_cut)) {
+  # Obtener el set correspondiente
+  set <- droplevels(datasets_cut[[i]])
+
+  # Seleccionar las variables de entrada al modelo
+  varsEntrada <- setdiff(names(set),c("tipo"))
+  
+  # Entrenar y almacenar cada modelo de LDA obtenido
+  models[[i]] <-  train(set[varsEntrada], set[["tipo"]], method='gbm', trControl=tc)
+  }
+```
+
+## Integrar el modelo de votación y someterlo a test
+
+```{r}
+# Inicializar el vector de predicciones y el data frame de votos
+predictions_test <- vector()
+votes_test <- data.frame(matrix(ncol = 16, nrow = 0))
+proteins <- levels(macro_type)
+colnames(votes_test) <- proteins
+
+# Para cada proteína del conjunto de test
+for (p in rownames(data_test20)) {
+  # Para cada modelo
+  for (m in 1:length(models)) {
+    # Obtener las variables de entrada con las que trabaja el modelo m
+    varsEntrada <- setdiff(names(datasets_cut[[m]]),c("tipo"))
+    
+    # Almacenar su predicción temporalmente
+    predictions_test[m] <- predict(models[m],newdata=data[p,varsEntrada])
+  }
+  
+  # Formar cada fila del data frame contando las apariciones de cada clase de proteína
+  for (pr in proteins) {
+    if (pr == "AF_1521") row <- sum(sapply(predictions_test,function(x) x==pr))
+    else row <- cbind(row, sum(sapply(predictions_test,function(x) x==pr)))
+  }
+  
+  # Almacenar el id (número) del ejemplar y su número de votos para cada tipo de proteína
+  votes_test[nrow(votes_test)+1,] <- row
+}
+```
+
+## Obtener el umbral para cada técnica de ML en función del coeficiente de acuerdo en la votación
+
+```{r}
+library(plyr)
+
+max_votes <- data.frame(matrix(ncol = 2, nrow = 0))
+cols <- cbind("x", "max")
+colnames(max_votes) <- cols
+
+i <- 0
+
+for (p in rownames(votes_test)) {
+  max <- which.max(votes_test[p,])
+  fam_pred <- colnames(votes_test)[max]
+  if (fam_pred != "unknown") {
+    i <- i+1
+    vot <- votes_test[p,max]
+    row <- cbind(i,vot)
+    max_votes[nrow(max_votes)+1,] <- row
+  }
+}
+
+freqs <- count(max_votes$max)
+freqs
+
+# Basic histogram plot with mean line and marginal rug
+gghistogram(max_votes, x = "max", bins = 20, fill = "#0073C2FF", color = "#0073C2FF", add = "mean", 
+            alpha = 0.5, rug = TRUE)
+
+freqs <- freqs[1:(length(freqs$x)-1),]
+
+# Establecer el umbral que decidirá los ejemplares prometedores
+umbral = freqs$x[which(freqs[2] == max(freqs[2]))[1]]
+```
+
+## Obtener las predicciones en función al umbral
+
+```{r}
+# Definir el data frame para las predicciones del test
+winners_test <- data.frame(matrix(ncol = 4, nrow = 0))
+cols <- cbind("id", "votes", "family_pred", "family_orig")
+colnames(winners_test) <- cols
+
+# Para cada ejemplar votado (los del conjunto de test)
+for (p in rownames(votes_test)) {
+  max <- which.max(votes_test[p,])
+  vot <- votes_test[p,max]
+  # Solo si los votos superan el umbral se considera una predicción fiable 
+  if (vot >= umbral) {
+    fam_pred <- colnames(votes_test)[max]
+    row <- cbind(rownames(data_test20)[as.numeric(p)],vot,fam_pred,data_test20$tipo[as.numeric(p)])
+    winners_test[nrow(winners_test)+1,] <- row
+  }
+}
+```
+
+## Estudiar los valores de Accuracy y Kappa
+
+```{r}
+# Gráfico de barras para demostrar la descompensación de ejemplos de cada clase
+barplot(rbind(table(winners_test$family_pred)),
+        main="Proporción de clases en la predicción",
+			  xlab="Familia",col="pink")
+
+# Obtener las clases que aparecen en las predicciones y en los casos reales
+union <- union(winners_test$family_pred, winners_test$family_orig)
+
+# El Accuracy no es fiable, siempre saldrá alto en este conjunto desbalanceado, observamos la matriz de confusión
+mf <- caret::confusionMatrix(factor(winners_test$family_pred,union),
+                            factor(winners_test$family_orig,union),
+                            NULL, c("Predicción", "Valor real"))
+```
+
+## Crear la tabla para la comparación de número de modelos
+
+```{r}
+if (length(models) == 31) {
+  # Definir el data frame para comparar el número de modelos (Método 2b)
+  num_models_df <- data.frame(matrix(ncol = 5, nrow = 0))
+  cols <- cbind("Models", "Predictions", "Kappa", "Accuracy", "Coincidence")
+  colnames(num_models_df) <- cols
+  
+  # Añadir la primera fila
+  num_models_df[nrow(num_models_df)+1,] <- cbind(length(models),NA,mf$overall[[2]],mf$overall[[1]],NA)
+} else {
+  # Añadir la siguiente fila
+  num_models_df[nrow(num_models_df)+1,] <- cbind(length(models),NA,mf$overall[[2]],mf$overall[[1]],NA)
+}
+```
+
+## Predicción del modelo de votación sobre las proteínas desconocidas
+
+```{r}
+# Inicializar el vector de predicciones y el data frame de votos
+predictions <- vector()
+votes <- data.frame(matrix(ncol = 16, nrow = 0))
+colnames(votes) <- proteins
+
+# Para cada ejemplar desconocido
+for (p in rownames(data)) {
+  # Para cada modelo
+  for (m in 1:length(models)) {
+    # Obtener las variables de entrada con las que trabaja el modelo m
+    varsEntrada <- setdiff(names(datasets_cut[[m]]),c("tipo"))
+    
+    # Almacenar su predicción temporalmente
+    predictions[m] <- predict(models[m],newdata=data[p,varsEntrada])
+  }
+  
+  # Formar cada fila del data frame contando las apariciones de cada clase de proteína
+  for (pr in proteins) {
+    if (pr == "AF_1521") row <- sum(sapply(predictions,function(x) x==pr))
+    else row <- cbind(row, sum(sapply(predictions,function(x) x==pr)))
+  }
+  
+  # Almacenar el id (número) del ejemplar y su número de votos como ejemplar conocido (modelos a los que      
+  # engañó)
+  votes[nrow(votes)+1,] <- row
+}
+```
+
+## Predicciones finales del Método 2
+
+```{r}
+# Definir el data frame para las predicciones finales
+winners <- data.frame(matrix(ncol = 4, nrow = 0))
+cols <- cbind("id","votes","score","family")
+colnames(winners) <- cols
+
+# Para cada ejemplar votado (todos los del conjunto de datos)
+for (p in rownames(votes)) {
+  max <- which.max(votes[p,])
+  vot <- votes[p,max]
+  fam <- colnames(votes)[max]
+  # Nos quedamos con las predicciones que superen el umbral, no sean predicciones sobre las proteínas conocidas
+  # y sean predicciones fallidas sobre las desconocidas (fueron predecidas como alguna familia)
+  if (vot >= umbral & as.numeric(p) > 64 & fam != "unknown") {
+    row <- cbind(p,vot,round((vot/length(models))*100,2),fam)
+    winners[nrow(winners)+1,] <- row
+  }
+}
+
+# Añadir las predicciones a la tabla comparativa del número de modelos
+num_models_df$Predictions[length(models)/(num_sets+1)] <- length(rownames(winners))
+
+# Gráfico de barras para mostrar la cantidad de predicciones de cada familia
+barplot(rbind(table(winners$family)),
+        main="Proporción de clases en la predicción",
+			  xlab="Familia",col="cyan")
+```
+
+# Evaluación de los resultados mediante la herramienta Guidance
+
+## Evaluación de los resultados obtenidos por el Método 1
+
+```{r}
+
+finalResultsM1 <- data.frame(matrix(ncol = 5, nrow = 0))
+cols <- cbind("protein_id","guidance_family","guidance_score","projection_family","projection_score")
+colnames(finalResultsM1) <- cols
+
+proteinIDs <- table[3:2329,421]
+pred_vec_failedIDs <- proteinIDs$ID_Principal[pred_vec_failed$id]
+path <- "C:/Users/aleja/Universidad/Asignaturas/TFG/fasta"
+outpathW <- "C:/Users/aleja/Universidad/Asignaturas/TFG/fastaOutputs"
+outpathU <- "/mnt/c/Users/aleja/Universidad/Asignaturas/TFG/fastaOutputs"
+guidancePath <-"/mnt/c/Users/aleja/Universidad/Asignaturas/TFG/guidance.v2.02/www/Guidance/guidance.pl"
+
+t0 <- proc.time()[[3]]
+meanIterTime <- 0
+for (v in pred_vec_failedIDs) {
+  url <- paste0("https://www.uniprot.org/uniprot/",v,".fasta")
+  flag <- tryCatch(fasta <- read.delim(url, stringsAsFactors=F), 
+                   error=function(e) cat('No se pudo encontrar el fichero .fasta de la proteína',w,'\n'))
+  
+  if (!is.null(flag)) {
+    aminoAcids <- ""
+    for (i in 1:length(rownames(fasta))) {
+      aminoAcids <- paste(aminoAcids,fasta[i,1],sep="")
+    }
+    name <- paste0(">",v)
+    
+    allres <- NULL
+    files <- list.files(path,full.names = T)
+    files <- files[grep("fasta.txt$",files)]
+    for(f in files){
+      t1 <- proc.time()[[3]]
+      
+      cat('Proteína: ',which(pred_vec_failedIDs == v),' de ',length(pred_vec_failedIDs),' - Familia: ',which(files == f),
+          ' de ',length(files),'\n',sep="")
+      
+      filedata = read.delim(f,stringsAsFactors=F,header = F)
+      df = data.frame(do.call(rbind,lapply(seq(1,as.integer(nrow(filedata)),2),
+                                             function(x){ c(filedata[x,1],filedata[x+1,1])})), stringsAsFactors=F)
+      df = rbind(df,c(name,aminoAcids))
+      newdf = NULL
+      devnull = apply(df,1,function(x){ newdf <<- rbind(newdf,rbind(x[1],x[2])) })
+      newfastafileW = paste0(f,"_withpred.txt")
+      write.table(newdf,
+                  newfastafileW,
+                  quote=F,col.names=F,row.names=F)
+      newfastafileU = paste0("/mnt/c",substr(newfastafileW, 3, nchar(newfastafileW)))
+      
+      invisible(system(paste0('bash -c ','"rm -f -r ',outpathU,'/*"'), intern = T))
+      invisible(system(paste0('bash -c ','"perl ',guidancePath,' --seqFile ',newfastafileU,
+                    ' -seqType aa --outDir ',outpathU,' --msaProgram MAFFT --bootstraps 1"'), intern = T))
+    
+      localres = read.delim(paste0(outpathW,"/MSA.MAFFT.Guidance2_res_pair_seq.scr_with_Names"),
+               stringsAsFactors=F,comment.char = "#")
+      allres = rbind(allres,cbind(substr(basename(f),1,nchar(basename(f))-10),
+                                  localres[localres$SEQUENCE_NAME == v,]))
+      
+      t2 <- proc.time()[[3]]
+    
+      globalTime <- t2-t0
+      unitGlobal <- 's'
+      remainingProts <- length(pred_vec_failedIDs) - which(pred_vec_failedIDs == v)
+      remainingFams <- length(files) - which(files == f)
+      iterTime <- t2-t1
+      if(meanIterTime == 0) meanIterTime = iterTime
+      else meanIterTime <- (meanIterTime+iterTime)/2
+      unitRemaining <- 's'
+      remainingTime <- ((remainingProts * 15) + remainingFams) * meanIterTime
+      percentage <- round((globalTime/(globalTime+remainingTime)) * 100,2)
+      
+      if (globalTime > 59) {
+        globalTime <- round(globalTime/60)
+        unitGlobal <- 'm'
+      }
+      if (globalTime > 59) {
+        globalTime <- round(globalTime/60)
+        unitGlobal <- 'h'
+      }
+      
+      if (remainingTime > 59) {
+        remainingTime <- round(remainingTime/60)
+        unitRemaining <- 'm'
+      }
+      if (remainingTime > 59) {
+        remainingTime <- round(remainingTime/60)
+        unitRemaining <- 'h'
+      }
+      
+      cat(' *** Tiempo: ',globalTime,' ',unitGlobal,'\n',sep="")
+      cat(' *** Restante: ',remainingTime,' ',unitRemaining,'\n',sep="")
+      cat(' *** [ ',percentage,'% ]\n',sep="")
+    }
+    
+    colnames(allres)[1] = "FAMILY"
+    write.csv(allres,paste0(path,"/ResultsFor",v,".csv"))
+    
+    maxScore <- which.max(allres$SEQUENCE_SCORE)
+    
+    if (allres$FAMILY[maxScore] == "H2A1_2") fam_pred <- "H2A1/2"
+    else fam_pred <- allres$FAMILY[maxScore]
+    
+    finalResultsM1[nrow(finalResultsM1)+1,] <- cbind(v,fam_pred,allres$SEQUENCE_SCORE[maxScore],
+                                                     pred_vec_failed$family_pred[which(pred_vec_failedIDs == v)],
+                                                     pred_vec_failed$score[which(pred_vec_failedIDs == v)])
+    t2 <- proc.time()[[3]]
+  }
+}
+
+cat(' *** Tiempo total: ',globalTime,' ',unitGlobal,' *** \n\n\n',sep="")
+```
+## Comparación entre los resultados obtenidos por el Método 1 y Guidance
+
+```{r}
+# Obtener las clases que aparecen en las predicciones y en los casos reales
+union <- union(finalResultsM1$projection_family, finalResultsM1$guidance_family)
+
+# Comprobar el grado de coincidencia entre ambos métodos
+mf <- caret::confusionMatrix(factor(finalResultsM1$projection_family,union),
+                       factor(finalResultsM1$guidance_family,union),
+                       NULL, c("Predicción", "Valor real"))
+```
+
+## Evaluación de los resultados obtenidos por el Método 1b
+
+```{r}
+
+finalResultsM1b <- data.frame(matrix(ncol = 5, nrow = 0))
+cols <- cbind("protein_id","guidance_family","guidance_score","projection_family","projection_score")
+colnames(finalResultsM1b) <- cols
+
+proteinIDs <- table[3:2329,421]
+pred_vec_failedIDs <- proteinIDs$ID_Principal[pred_vec_failed$id]
+path <- "C:/Users/aleja/Universidad/Asignaturas/TFG/fasta"
+outpathW <- "C:/Users/aleja/Universidad/Asignaturas/TFG/fastaOutputs"
+outpathU <- "/mnt/c/Users/aleja/Universidad/Asignaturas/TFG/fastaOutputs"
+guidancePath <-"/mnt/c/Users/aleja/Universidad/Asignaturas/TFG/guidance.v2.02/www/Guidance/guidance.pl"
+
+t0 <- proc.time()[[3]]
+meanIterTime <- 0
+for (v in pred_vec_failedIDs) {
+  url <- paste0("https://www.uniprot.org/uniprot/",v,".fasta")
+  flag <- tryCatch(fasta <- read.delim(url, stringsAsFactors=F), 
+                   error=function(e) cat('No se pudo encontrar el fichero .fasta de la proteína',w,'\n'))
+  
+  if (!is.null(flag)) {
+    aminoAcids <- ""
+    for (i in 1:length(rownames(fasta))) {
+      aminoAcids <- paste(aminoAcids,fasta[i,1],sep="")
+    }
+    name <- paste0(">",v)
+    
+    allres <- NULL
+    files <- list.files(path,full.names = T)
+    files <- files[grep("fasta.txt$",files)]
+    for(f in files){
+      t1 <- proc.time()[[3]]
+      
+      cat('Proteína: ',which(pred_vec_failedIDs == v),' de ',length(pred_vec_failedIDs),' - Familia: ',which(files == f),
+          ' de ',length(files),'\n',sep="")
+      
+      filedata = read.delim(f,stringsAsFactors=F,header = F)
+      df = data.frame(do.call(rbind,lapply(seq(1,as.integer(nrow(filedata)),2),
+                                             function(x){ c(filedata[x,1],filedata[x+1,1])})), stringsAsFactors=F)
+      df = rbind(df,c(name,aminoAcids))
+      newdf = NULL
+      devnull = apply(df,1,function(x){ newdf <<- rbind(newdf,rbind(x[1],x[2])) })
+      newfastafileW = paste0(f,"_withpred.txt")
+      write.table(newdf,
+                  newfastafileW,
+                  quote=F,col.names=F,row.names=F)
+      newfastafileU = paste0("/mnt/c",substr(newfastafileW, 3, nchar(newfastafileW)))
+      
+      invisible(system(paste0('bash -c ','"rm -f -r ',outpathU,'/*"'), intern = T))
+      invisible(system(paste0('bash -c ','"perl ',guidancePath,' --seqFile ',newfastafileU,
+                    ' -seqType aa --outDir ',outpathU,' --msaProgram MAFFT --bootstraps 1"'), intern = T))
+    
+      localres = read.delim(paste0(outpathW,"/MSA.MAFFT.Guidance2_res_pair_seq.scr_with_Names"),
+               stringsAsFactors=F,comment.char = "#")
+      allres = rbind(allres,cbind(substr(basename(f),1,nchar(basename(f))-10),
+                                  localres[localres$SEQUENCE_NAME == v,]))
+      
+      t2 <- proc.time()[[3]]
+    
+      globalTime <- t2-t0
+      unitGlobal <- 's'
+      remainingProts <- length(pred_vec_failedIDs) - which(pred_vec_failedIDs == v)
+      remainingFams <- length(files) - which(files == f)
+      iterTime <- t2-t1
+      if(meanIterTime == 0) meanIterTime = iterTime
+      else meanIterTime <- (meanIterTime+iterTime)/2
+      unitRemaining <- 's'
+      remainingTime <- ((remainingProts * 15) + remainingFams) * meanIterTime
+      percentage <- round((globalTime/(globalTime+remainingTime)) * 100,2)
+      
+      if (globalTime > 59) {
+        globalTime <- round(globalTime/60)
+        unitGlobal <- 'm'
+      }
+      if (globalTime > 59) {
+        globalTime <- round(globalTime/60)
+        unitGlobal <- 'h'
+      }
+      
+      if (remainingTime > 59) {
+        remainingTime <- round(remainingTime/60)
+        unitRemaining <- 'm'
+      }
+      if (remainingTime > 59) {
+        remainingTime <- round(remainingTime/60)
+        unitRemaining <- 'h'
+      }
+      
+      cat(' *** Tiempo: ',globalTime,' ',unitGlobal,'\n',sep="")
+      cat(' *** Restante: ',remainingTime,' ',unitRemaining,'\n',sep="")
+      cat(' *** [ ',percentage,'% ]\n',sep="")
+    }
+    
+    colnames(allres)[1] = "FAMILY"
+    write.csv(allres,paste0(path,"/ResultsFor",v,".csv"))
+    
+    maxScore <- which.max(allres$SEQUENCE_SCORE)
+    
+    if (allres$FAMILY[maxScore] == "H2A1_2") fam_pred <- "H2A1/2"
+    else fam_pred <- allres$FAMILY[maxScore]
+    
+    finalResultsM1b[nrow(finalResultsM1b)+1,] <- cbind(v,fam_pred,allres$SEQUENCE_SCORE[maxScore],
+                                                     pred_vec_failed$family_pred[which(pred_vec_failedIDs == v)],
+                                                     pred_vec_failed$score[which(pred_vec_failedIDs == v)])
+    t2 <- proc.time()[[3]]
+  }
+}
+
+cat(' *** Tiempo total: ',globalTime,' ',unitGlobal,' *** \n\n\n',sep="")
+```
+## Comparación entre los resultados obtenidos por el Método 1b y Guidance
+
+```{r}
+# Obtener las clases que aparecen en las predicciones y en los casos reales
+union <- union(finalResultsM1b$projection_family, finalResultsM1b$guidance_family)
+
+# Comprobar el grado de coincidencia entre ambos métodos
+mf <- caret::confusionMatrix(factor(finalResultsM1b$projection_family,union),
+                       factor(finalResultsM1b$guidance_family,union),
+                       NULL, c("Predicción", "Valor real"))
+```
+
+## Evaluación de los resultados obtenidos por el Método 1c
+
+```{r}
+
+finalResultsM1c <- data.frame(matrix(ncol = 5, nrow = 0))
+cols <- cbind("protein_id","guidance_family","guidance_score","projection_family","projection_score")
+colnames(finalResultsM1c) <- cols
+
+proteinIDs <- table[3:2329,421]
+pred_vec_failedIDs <- proteinIDs$ID_Principal[pred_vec_failed$id]
+path <- "C:/Users/aleja/Universidad/Asignaturas/TFG/fasta"
+outpathW <- "C:/Users/aleja/Universidad/Asignaturas/TFG/fastaOutputs"
+outpathU <- "/mnt/c/Users/aleja/Universidad/Asignaturas/TFG/fastaOutputs"
+guidancePath <-"/mnt/c/Users/aleja/Universidad/Asignaturas/TFG/guidance.v2.02/www/Guidance/guidance.pl"
+
+t0 <- proc.time()[[3]]
+meanIterTime <- 0
+for (v in pred_vec_failedIDs) {
+  url <- paste0("https://www.uniprot.org/uniprot/",w,".fasta")
+  flag <- tryCatch(fasta <- read.delim(url, stringsAsFactors=F), 
+                   error=function(e) cat('No se pudo encontrar el fichero .fasta de la proteína',w,'\n'))
+  
+  if (!is.null(flag)) {
+    aminoAcids <- ""
+    for (i in 1:length(rownames(fasta))) {
+      aminoAcids <- paste(aminoAcids,fasta[i,1],sep="")
+    }
+    name <- paste0(">",v)
+    
+    allres <- NULL
+    files <- list.files(path,full.names = T)
+    files <- files[grep("fasta.txt$",files)]
+    for(f in files){
+      t1 <- proc.time()[[3]]
+      
+      cat('Proteína: ',which(pred_vec_failedIDs == v),' de ',length(pred_vec_failedIDs),' - Familia: ',which(files == f),
+          ' de ',length(files),'\n',sep="")
+      
+      filedata = read.delim(f,stringsAsFactors=F,header = F)
+      df = data.frame(do.call(rbind,lapply(seq(1,as.integer(nrow(filedata)),2),
+                                             function(x){ c(filedata[x,1],filedata[x+1,1])})), stringsAsFactors=F)
+      df = rbind(df,c(name,aminoAcids))
+      newdf = NULL
+      devnull = apply(df,1,function(x){ newdf <<- rbind(newdf,rbind(x[1],x[2])) })
+      newfastafileW = paste0(f,"_withpred.txt")
+      write.table(newdf,
+                  newfastafileW,
+                  quote=F,col.names=F,row.names=F)
+      newfastafileU = paste0("/mnt/c",substr(newfastafileW, 3, nchar(newfastafileW)))
+      
+      invisible(system(paste0('bash -c ','"rm -f -r ',outpathU,'/*"'), intern = T))
+      invisible(system(paste0('bash -c ','"perl ',guidancePath,' --seqFile ',newfastafileU,
+                    ' -seqType aa --outDir ',outpathU,' --msaProgram MAFFT --bootstraps 1"'), intern = T))
+    
+      localres = read.delim(paste0(outpathW,"/MSA.MAFFT.Guidance2_res_pair_seq.scr_with_Names"),
+               stringsAsFactors=F,comment.char = "#")
+      allres = rbind(allres,cbind(substr(basename(f),1,nchar(basename(f))-10),
+                                  localres[localres$SEQUENCE_NAME == v,]))
+      
+      t2 <- proc.time()[[3]]
+    
+      globalTime <- t2-t0
+      unitGlobal <- 's'
+      remainingProts <- length(pred_vec_failedIDs) - which(pred_vec_failedIDs == v)
+      remainingFams <- length(files) - which(files == f)
+      iterTime <- t2-t1
+      if(meanIterTime == 0) meanIterTime = iterTime
+      else meanIterTime <- (meanIterTime+iterTime)/2
+      unitRemaining <- 's'
+      remainingTime <- ((remainingProts * 15) + remainingFams) * meanIterTime
+      percentage <- round((globalTime/(globalTime+remainingTime)) * 100,2)
+      
+      if (globalTime > 59) {
+        globalTime <- round(globalTime/60)
+        unitGlobal <- 'm'
+      }
+      if (globalTime > 59) {
+        globalTime <- round(globalTime/60)
+        unitGlobal <- 'h'
+      }
+      
+      if (remainingTime > 59) {
+        remainingTime <- round(remainingTime/60)
+        unitRemaining <- 'm'
+      }
+      if (remainingTime > 59) {
+        remainingTime <- round(remainingTime/60)
+        unitRemaining <- 'h'
+      }
+      
+      cat(' *** Tiempo: ',globalTime,' ',unitGlobal,'\n',sep="")
+      cat(' *** Restante: ',remainingTime,' ',unitRemaining,'\n',sep="")
+      cat(' *** [ ',percentage,'% ]\n',sep="")
+    }
+    
+    colnames(allres)[1] = "FAMILY"
+    write.csv(allres,paste0(path,"/ResultsFor",v,".csv"))
+    
+    maxScore <- which.max(allres$SEQUENCE_SCORE)
+    
+    if (allres$FAMILY[maxScore] == "H2A1_2") fam_pred <- "H2A1/2"
+    else fam_pred <- allres$FAMILY[maxScore]
+    
+    finalResultsM1c[nrow(finalResultsM1c)+1,] <- cbind(v,fam_pred,allres$SEQUENCE_SCORE[maxScore],
+                                                     pred_vec_failed$family_pred[which(pred_vec_failedIDs == v)],
+                                                     pred_vec_failed$score[which(pred_vec_failedIDs == v)])
+    t2 <- proc.time()[[3]]
+  }
+}
+
+cat(' *** Tiempo total: ',globalTime,' ',unitGlobal,' *** \n\n\n',sep="")
+```
+## Comparación entre los resultados obtenidos por el Método 1c y Guidance
+
+```{r}
+# Obtener las clases que aparecen en las predicciones y en los casos reales
+union <- union(finalResultsM1c$projection_family, finalResultsM1c$guidance_family)
+
+# Comprobar el grado de coincidencia entre ambos métodos
+mf <- caret::confusionMatrix(factor(finalResultsM1c$projection_family,union),
+                       factor(finalResultsM1c$guidance_family,union),
+                       NULL, c("Predicción", "Valor real"))
+```
+
+## Evaluación de los resultados obtenidos por el Método 2
+
+```{r}
+
+finalResultsM2 <- data.frame(matrix(ncol = 5, nrow = 0))
+cols <- cbind("protein_id","guidance_family","guidance_score","votation_family","votation_score")
+colnames(finalResultsM2) <- cols
+
+winnersIDs <- proteinIDs$ID_Principal[as.numeric(winners$id)]
+
+t0 <- proc.time()[[3]]
+meanIterTime <- 0
+for (w in winnersIDs) {
+  url <- paste0("https://www.uniprot.org/uniprot/",w,".fasta")
+  flag <- tryCatch(fasta <- read.delim(url, stringsAsFactors=F), 
+                   error=function(e) cat('No se pudo encontrar el fichero .fasta de la proteína',w,'\n'))
+  
+  if (!is.null(flag)) {
+    aminoAcids <- ""
+    for (i in 1:length(rownames(fasta))) {
+      aminoAcids <- paste(aminoAcids,fasta[i,1],sep="")
+    }
+    name <- paste0(">",w)
+    
+    allres <- NULL
+    files <- list.files(path,full.names = T)
+    files <- files[grep("fasta.txt$",files)]
+    for(f in files){
+      t1 <- proc.time()[[3]]
+      
+      cat('Proteína: ',which(winnersIDs == w),' de ',length(winnersIDs),' - Familia: ',which(files == f),
+          ' de ',length(files),'\n',sep="")
+      
+      filedata = read.delim(f,stringsAsFactors=F,header = F)
+      df = data.frame(do.call(rbind,lapply(seq(1,as.integer(nrow(filedata)),2),
+                                             function(x){ c(filedata[x,1],filedata[x+1,1])})), stringsAsFactors=F)
+      df = rbind(df,c(name,aminoAcids))
+      newdf = NULL
+      devnull = apply(df,1,function(x){ newdf <<- rbind(newdf,rbind(x[1],x[2])) })
+      newfastafileW = paste0(f,"_withpred.txt")
+      write.table(newdf,
+                  newfastafileW,
+                  quote=F,col.names=F,row.names=F)
+      newfastafileU = paste0("/mnt/c",substr(newfastafileW, 3, nchar(newfastafileW)))
+      
+      invisible(system(paste0('bash -c ','"rm -f -r ',outpathU,'/*"'), intern = T))
+      invisible(system(paste0('bash -c ','"perl ',guidancePath,' --seqFile ',newfastafileU,
+                    ' -seqType aa --outDir ',outpathU,' --msaProgram MAFFT --bootstraps 1"'), intern = T))
+    
+      localres = read.delim(paste0(outpathW,"/MSA.MAFFT.Guidance2_res_pair_seq.scr_with_Names"),
+               stringsAsFactors=F,comment.char = "#")
+      allres = rbind(allres,cbind(substr(basename(f),1,nchar(basename(f))-10),
+                                  localres[localres$SEQUENCE_NAME == w,]))
+      
+      t2 <- proc.time()[[3]]
+    
+      globalTime <- t2-t0
+      unitGlobal <- 's'
+      remainingProts <- length(winnersIDs) - which(winnersIDs == w)
+      remainingFams <- length(files) - which(files == f)
+      iterTime <- t2-t1
+      if(meanIterTime == 0) meanIterTime = iterTime
+      else meanIterTime <- (meanIterTime+iterTime)/2
+      unitRemaining <- 's'
+      remainingTime <- ((remainingProts * 15) + remainingFams) * meanIterTime
+      percentage <- round((globalTime/(globalTime+remainingTime)) * 100,2)
+      
+      if (globalTime > 59) {
+        globalTime <- round(globalTime/60)
+        unitGlobal <- 'm'
+      }
+      if (globalTime > 59) {
+        globalTime <- round(globalTime/60)
+        unitGlobal <- 'h'
+      }
+      
+      if (remainingTime > 59) {
+        remainingTime <- round(remainingTime/60)
+        unitRemaining <- 'm'
+      }
+      if (remainingTime > 59) {
+        remainingTime <- round(remainingTime/60)
+        unitRemaining <- 'h'
+      }
+      
+      cat(' *** Tiempo: ',globalTime,' ',unitGlobal,'\n',sep="")
+      cat(' *** Restante: ',remainingTime,' ',unitRemaining,'\n',sep="")
+      cat(' *** [ ',percentage,'% ]\n',sep="")
+    }
+  
+    
+    colnames(allres)[1] = "FAMILY"
+    write.csv(allres,paste0(path,"/ResultsFor",w,".csv"))
+    
+    maxScore <- which.max(allres$SEQUENCE_SCORE)
+    
+    if (allres$FAMILY[maxScore] == "H2A1_2") fam_pred <- "H2A1/2"
+    else fam_pred <- allres$FAMILY[maxScore]
+    
+    finalResultsM2[nrow(finalResultsM2)+1,] <- cbind(w,fam_pred,allres$SEQUENCE_SCORE[maxScore],
+                                                     winners$family[which(winnersIDs == w)],
+                                                     winners$score[which(winnersIDs == w)])
+    t2 <- proc.time()[[3]]
+  }
+}
+
+cat(' *** Tiempo total: ',globalTime,' ',unitGlobal,' *** \n\n\n',sep="")
+```
+
+## Comparación entre los resultados obtenidos por el Método 2 y Guidance
+
+```{r}
+# Obtener las clases que aparecen en las predicciones y en los casos reales
+union <- union(finalResultsM2$votation_family, finalResultsM2$guidance_family)
+
+# Comprobar el grado de coincidencia entre ambos métodos
+mf <- caret::confusionMatrix(factor(finalResultsM2$votation_family,union),
+                             factor(finalResultsM2$guidance_family,union),
+                             NULL, c("Predicción", "Valor real"))
+mf$overall[1]
+```
+
+## Gráfica Método 2b
+
+```{r}
+# Añadir las predicciones a la tabla comparativa del número de modelos (Método 2b)
+num_models_df$Coincidence[length(models)/(num_sets+1)] <- mf$overall[[1]]
+
+# Mostrar gráficamente los resultados del Método 2b
+ggplot(data = num_models_df, aes(x = Models)) +
+  geom_line(aes(y = Predictions, colour = "Predictions")) +
+  geom_point(aes(y = Predictions, colour = "Predictions")) +
+  geom_line(aes(y = Kappa, colour = "Kappa")) +
+  geom_point(aes(y = Kappa, colour = "Kappa")) +
+  geom_line(aes(y = Accuracy, colour = "Accuracy")) +
+  geom_point(aes(y = Accuracy, colour = "Accuracy")) +
+  geom_line(aes(y = Coincidence, colour = "Coincidence")) +
+  geom_point(aes(y = Coincidence, colour = "Coincidence")) +
+  scale_colour_manual("", 
+                      breaks = c("Predictions", "Kappa", "Accuracy", "Coincidence"),
+                      values = c("Predictions"="red", "Kappa"="orange", "Accuracy"="blue", "Coincidence"="green")) +
+  xlab("Número de modelos") +
+  scale_y_continuous(" ") + 
+  labs(title="Evolución de los diferentes parámetros para cada número de modelos")
+
+# Mostrar la gráfica escalada
+ggplot(data = num_models_df, aes(x = Models)) +
+  geom_line(aes(y = scale(Predictions), colour = "Predictions")) +
+  geom_point(aes(y = scale(Predictions), colour = "Predictions")) +
+  geom_line(aes(y = scale(Kappa), colour = "Kappa")) +
+  geom_point(aes(y = scale(Kappa), colour = "Kappa")) +
+  geom_line(aes(y = scale(Accuracy), colour = "Accuracy")) +
+  geom_point(aes(y = scale(Accuracy), colour = "Accuracy")) +
+  geom_line(aes(y = scale(Coincidence), colour = "Coincidence")) +
+  geom_point(aes(y = scale(Coincidence), colour = "Coincidence")) +
+  scale_colour_manual("", 
+                      breaks = c("Predictions", "Kappa", "Accuracy", "Coincidence"),
+                      values = c("Predictions"="red", "Kappa"="orange", "Accuracy"="blue", "Coincidence"="green")) +
+  xlab("Número de modelos") +
+  scale_y_continuous(" ") + 
+  labs(title="Evolución de los diferentes parámetros para cada número de modelos tras escalar los datos")
+```
