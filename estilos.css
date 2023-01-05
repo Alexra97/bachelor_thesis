@@ -82,6 +82,11 @@ nav ul li a {
 
 /* RESPONSIVE DESIGN */
 @media (max-width: 950px) { 
+  .contenedor-titulo {
+    width: 90%;
+    margin-left: 5%;
+    margin-top: 25vh;
+  }
   h1 {
     font-size: 34px;
   }
